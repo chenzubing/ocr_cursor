@@ -1,0 +1,7 @@
+paddlepaddle==2.5.1
+paddleocr
+Pillow
+opencv-python
+openai
+numpy
+colormath
