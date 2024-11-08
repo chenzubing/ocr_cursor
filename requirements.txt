@@ -1,8 +1,5 @@
-paddlepaddle==2.5.1
-paddleocr
+easyocr
 Pillow
 opencv-python
-openai
 numpy
 colormath
-easyocr
