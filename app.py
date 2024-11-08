@@ -71,11 +71,36 @@ def create_output_dir():
     if not os.path.exists('output'):
         os.makedirs('output')
 
+def resize_image(image_path, max_size=4000):
+    """调整图片大小，保持比例"""
+    img = Image.open(image_path)
+    width, height = img.size
+    
+    # 如果图片尺寸在限制范围内，直接返回原始路径
+    if width <= max_size and height <= max_size:
+        return image_path
+    
+    # 计算缩放比例
+    ratio = min(max_size/width, max_size/height)
+    new_width = int(width * ratio)
+    new_height = int(height * ratio)
+    
+    # 调整图片大小
+    img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    
+    # 保存调整后的图片
+    output_path = os.path.join('output', 'resized_' + os.path.basename(image_path))
+    img.save(output_path)
+    return output_path
+
 def image_to_text(image_path):
     """将图片转换为文本"""
     try:
+        # 预处理图片
+        processed_image = resize_image(image_path)
+        
         # 读取图片
-        img = cv2.imread(image_path)
+        img = cv2.imread(processed_image)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         # 初始化 EasyOCR 和颜色分析器
@@ -84,7 +109,7 @@ def image_to_text(image_path):
         
         print("正在识别文字和颜色，请稍候...")
         # 执行文字识别
-        result = reader.readtext(image_path)
+        result = reader.readtext(processed_image)
         
         if not result:
             print("警告：未能识别出任何文字")
@@ -125,12 +150,22 @@ def image_to_text(image_path):
                 f.write(f"置信度: {item['confidence']:.2f}\n")
                 f.write("-" * 50 + "\n")
             
+        # 如果使用了调整后的图片，删除它
+        if processed_image != image_path and os.path.exists(processed_image):
+            os.remove(processed_image)
+            
         return output_file
     
     except Exception as e:
         print(f"错误：{str(e)}")
         import traceback
         print(traceback.format_exc())
+        # 清理临时文件
+        if 'processed_image' in locals() and processed_image != image_path:
+            try:
+                os.remove(processed_image)
+            except:
+                pass
         return None
 
 def main():
