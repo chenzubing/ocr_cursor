@@ -1,12 +1,10 @@
 import os
 import sys
-from paddleocr import PaddleOCR
+import easyocr
 from datetime import datetime
 from PIL import Image
-import numpy as np
 import cv2
-from openai import OpenAI
-import json
+import numpy as np
 from colormath.color_objects import sRGBColor, LabColor
 from colormath.color_conversions import convert_color
 from colormath.color_diff import delta_e_cie2000
@@ -20,9 +18,12 @@ class ColorTextAnalyzer:
             'blue': ((0, 0, 255), "蓝色可能表示链接或附加信息"),
             'black': ((0, 0, 0), "黑色为普通文本"),
             'yellow': ((255, 255, 0), "黄色可能表示警告或需要注意的信息"),
+            'purple': ((128, 0, 128), "紫色可能表示特殊标记或重点内容"),
+            'gray': ((128, 128, 128), "灰色可能表示次要信息或注释"),
         }
     
     def get_closest_color(self, rgb):
+        """获取最接近的预定义颜色"""
         min_diff = float('inf')
         closest_color = 'unknown'
         
@@ -40,43 +41,16 @@ class ColorTextAnalyzer:
         
         return closest_color, self.color_map.get(closest_color, (None, "未知颜色类型"))[1]
 
-def analyze_with_llm(text_color_data, client):
-    """使用 LLM 分析文本和颜色的语义"""
-    try:
-        prompt = """
-        请分析以下文本内容，文本包含了不同的颜色信息。请：
-        1. 总结文本的主要内容
-        2. 解释不同颜色文字的含义和作用
-        3. 指出重要的信息点
-        
-        文本和颜色信息如下：
-        """
-        
-        for item in text_color_data:
-            prompt += f"\n颜色: {item['color']}\n文本: {item['text']}\n颜色含义: {item['color_meaning']}\n"
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "你是一个专业的文档分析助手，擅长分析带有颜色标记的文本内容。"},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"LLM 分析错误: {str(e)}")
-        return None
-
 def get_text_color(img, box):
     """获取文本区域的主要颜色"""
-    x1, y1 = map(int, box[0])
-    x2, y2 = map(int, box[2])
+    # 转换坐标格式
+    x1, y1 = map(int, box[0][0])
+    x2, y2 = map(int, box[2][0])
     
     # 提取文本区域
-    text_region = img[y1:y2, x1:x2]
+    text_region = img[min(y1, y2):max(y1, y2), min(x1, x2):max(x1, x2)]
     if text_region.size == 0:
-        return (0, 0, 0)  # 返回黑色作为默认值
+        return (0, 0, 0)
     
     # 计算主要颜色
     pixels = text_region.reshape(-1, 3)
@@ -92,71 +66,72 @@ def get_text_color(img, box):
     
     return tuple(map(int, dominant_color))
 
-def process_image(image_path, client):
-    """处理图片并提取文本和颜色信息"""
+def create_output_dir():
+    """创建输出目录"""
+    if not os.path.exists('output'):
+        os.makedirs('output')
+
+def image_to_text(image_path):
+    """将图片转换为文本"""
     try:
         # 读取图片
         img = cv2.imread(image_path)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        # 初始化 OCR 和颜色分析器
-        ocr = PaddleOCR(use_angle_cls=True, lang='ch')
+        # 初始化 EasyOCR 和颜色分析器
+        reader = easyocr.Reader(['ch_sim', 'en'])
         color_analyzer = ColorTextAnalyzer()
         
-        # 存储识别结果
+        print("正在识别文字和颜色，请稍候...")
+        # 执行文字识别
+        result = reader.readtext(image_path)
+        
+        if not result:
+            print("警告：未能识别出任何文字")
+            return None
+        
+        # 按照垂直位置排序结果
+        sorted_result = sorted(result, key=lambda x: x[0][0][1])
+        
+        # 提取文本和颜色信息
         text_color_data = []
+        for detection in sorted_result:
+            box = detection[0]  # 文本框坐标
+            text = detection[1]  # 识别的文本
+            confidence = detection[2]  # 置信度
+            
+            # 获取文本颜色
+            rgb_color = get_text_color(img_rgb, box)
+            color_name, color_meaning = color_analyzer.get_closest_color(rgb_color)
+            
+            text_color_data.append({
+                'text': text,
+                'color': color_name,
+                'color_meaning': color_meaning,
+                'rgb': rgb_color,
+                'confidence': confidence
+            })
         
-        # OCR识别
-        result = ocr.ocr(image_path, cls=True)
+        # 生成输出文件名
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_file = os.path.join('output', f'ocr_result_{timestamp}.txt')
         
-        if result and result[0]:
-            for line in result[0]:
-                box = line[0]  # 文本框坐标
-                text = line[1][0]  # 识别的文本
-                
-                # 获取文本颜色
-                rgb_color = get_text_color(img_rgb, box)
-                color_name, color_meaning = color_analyzer.get_closest_color(rgb_color)
-                
-                text_color_data.append({
-                    'text': text,
-                    'color': color_name,
-                    'color_meaning': color_meaning,
-                    'rgb': rgb_color
-                })
-        
-        # 使用 LLM 分析结果
-        analysis = analyze_with_llm(text_color_data, client)
-        
-        return text_color_data, analysis
+        # 保存文本和颜色信息
+        with open(output_file, 'w', encoding='utf-8') as f:
+            for item in text_color_data:
+                f.write(f"文本: {item['text']}\n")
+                f.write(f"颜色: {item['color']} (RGB: {item['rgb']})\n")
+                f.write(f"颜色含义: {item['color_meaning']}\n")
+                f.write(f"置信度: {item['confidence']:.2f}\n")
+                f.write("-" * 50 + "\n")
+            
+        return output_file
     
     except Exception as e:
-        print(f"处理错误：{str(e)}")
+        print(f"错误：{str(e)}")
         import traceback
         print(traceback.format_exc())
-        return None, None
-
-def save_results(text_color_data, analysis, output_dir):
-    """保存识别和分析结果"""
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # 保存原始识别结果
-    raw_output = os.path.join(output_dir, f'ocr_result_{timestamp}.txt')
-    with open(raw_output, 'w', encoding='utf-8') as f:
-        for item in text_color_data:
-            f.write(f"文本: {item['text']}\n")
-            f.write(f"颜色: {item['color']}\n")
-            f.write(f"颜色含义: {item['color_meaning']}\n")
-            f.write(f"RGB值: {item['rgb']}\n")
-            f.write("-" * 50 + "\n")
-    
-    # 保存分析结果
-    if analysis:
-        analysis_output = os.path.join(output_dir, f'analysis_{timestamp}.txt')
-        with open(analysis_output, 'w', encoding='utf-8') as f:
-            f.write(analysis)
-    
-    return raw_output, analysis_output if analysis else None
+        return None
 
 def main():
     if len(sys.argv) != 2:
@@ -168,28 +143,14 @@ def main():
         print("错误：找不到指定的图片文件")
         return
     
-    # 检查环境变量中是否设置了 API key
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("警告：未设置 OPENAI_API_KEY 环境变量，将只进行 OCR 识别而不进行语义分析")
-    
-    # 创建 OpenAI 客户端
-    client = OpenAI(api_key=api_key) if api_key else None
-    
-    # 创建输出目录
-    output_dir = 'output'
-    os.makedirs(output_dir, exist_ok=True)
-    
+    create_output_dir()
     print("正在处理图片，请稍候...")
-    text_color_data, analysis = process_image(image_path, client)
+    output_file = image_to_text(image_path)
     
-    if text_color_data:
-        raw_output, analysis_output = save_results(text_color_data, analysis, output_dir)
-        print(f"识别结果已保存到：{raw_output}")
-        if analysis_output:
-            print(f"分析结果已保存到：{analysis_output}")
+    if output_file:
+        print(f"转换成功！结果保存在：{output_file}")
     else:
-        print("处理失败！")
+        print("转换失败！")
 
 if __name__ == "__main__":
     main() 

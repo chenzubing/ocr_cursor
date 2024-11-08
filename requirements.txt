@@ -5,3 +5,4 @@ opencv-python
 openai
 numpy
 colormath
+easyocr
